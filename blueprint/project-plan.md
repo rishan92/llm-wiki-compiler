@@ -566,6 +566,233 @@ Preserve at least:
   - `fallow`
 - `fallow` issues must be fixed before considering work complete.
 
+### 1.18 Canonical source metadata is corrected once
+
+Author, Work, and source identity metadata must be canonical and reusable. Derived
+recommendations, stages, examples, and graph nodes must not each carry an
+independently editable author or work string as their authoritative identity.
+
+Preferred structure:
+
+```text
+Author(neil-strauss)
+        ^ AUTHORED_BY
+Work(the-game)
+        ^ PART_OF_WORK
+Chapter 1  Chapter 2  Chapter 3
+                              ^ FROM_SOURCE
+                    RecommendationClaim
+```
+
+The recommendation points to its source chapter. The chapter resolves to the
+canonical Work, and the Work resolves to its canonical Author. A display can
+still render "Neil Strauss" beside a recommendation, but that value comes from
+the canonical reference rather than a copied field on every derived node.
+
+For example, accepted source metadata may conceptually contain:
+
+```yaml
+workId: the-game
+authors:
+  - neil-strauss
+```
+
+If the author was misspelled or the wrong author reference was selected, the
+user normally corrects that canonical location once. Dependent displays and
+relations then resolve through the corrected reference without hundreds of
+manual edits. Use the repository's existing metadata or entity conventions
+where they can express this. Do not create a parallel catalog solely for this
+fork.
+
+### 1.19 Critical metadata ambiguity gates expensive extraction
+
+Ingestion must distinguish detected metadata from canonical, accepted metadata.
+Conceptually, an unresolved source may contain:
+
+```yaml
+metadataStatus: needs_review
+detected:
+  author:
+    value: "Neil Strauss"
+    confidence: 0.58
+```
+
+After confirmation, the source uses canonical references:
+
+```yaml
+metadataStatus: confirmed
+authors:
+  - neil-strauss
+```
+
+The exact representation should follow repository conventions. The behavioral
+requirement is that detection is evidence, not silently accepted identity.
+
+Identity-critical metadata includes:
+
+- Work identity;
+- Author identity when needed to distinguish the Work or source;
+- source-to-chapter association when hierarchy or reconciliation depends on it.
+
+Publication year, optional display details, and other harmless descriptive
+fields are generally non-critical. Missing non-critical metadata should not
+interrupt ingestion.
+
+When critical identity cannot be resolved confidently, the flow is:
+
+```text
+source ingested
+      -> metadata resolution
+      -> NEEDS_METADATA / NEEDS_REVIEW
+      -> expensive semantic extraction is deferred
+```
+
+The system may surface one focused clarification or review requirement. Once
+the user confirms the canonical Work or Author, later chapters from that Work
+reuse the answer. It must not ask the same identity question for every chapter.
+High-confidence metadata may proceed automatically.
+
+### 1.20 Metadata changes use dependency-aware invalidation
+
+Canonical metadata corrections must propagate, but they must not automatically
+trigger full semantic re-extraction when meaning is unchanged.
+
+| Change | Expected consequence |
+| --- | --- |
+| Fix Author display spelling | Update canonical metadata and dependent displays; no semantic re-extraction. |
+| Correct Author reference on the same Work | Reconcile references; usually no semantic re-extraction. |
+| Fix publication year | Metadata-only update; no semantic re-extraction. |
+| Fix chapter title | Metadata-only update unless title participates in semantic context. |
+| Change Work identity | Reconcile source ownership and hierarchy; semantic re-extraction is likely. |
+| Change explicit social context supplied by the user | Semantic re-extraction is required. |
+| Correct chapter position where hierarchy affects interpretation | Reconcile dependencies and re-extract affected semantics when needed. |
+
+This extends the targeted invalidation philosophy already required for video
+segments and transcripts. The dependency model must distinguish a display-only
+metadata change from a semantic-context or ownership change.
+
+### 1.21 Generation provenance and model preference are explicit
+
+Every semantic extraction run must record enough provenance to identify:
+
+- the source ID and source version or hash;
+- the generation provider;
+- the generation model;
+- the extractor version;
+- the prompt version;
+- the profile/schema version.
+
+Conceptually:
+
+```yaml
+extractionRun:
+  id: extraction-002
+  source:
+    id: book-a-chapter-3
+    hash: abc123
+  generation:
+    provider: deepseek
+    model: deepseek-v4-pro
+  extractorVersion: social-rules-v4
+  promptVersion: 7
+  profileVersion: 3
+```
+
+The stored shape should reuse repository-native provenance structures. This
+information supports auditability, stale-extraction detection, targeted
+upgrades, and deliberate re-extraction with a better model.
+
+Model authority is configuration policy, not a numeric quality score copied
+onto graph nodes. A user may configure an ordered preference such as:
+
+```yaml
+extractionModelPreference:
+  - deepseek-v4-pro
+  - deepseek-v4-flash
+```
+
+The order means Pro is preferred to Flash. A future model can be inserted in
+the policy without migrating existing graph nodes. Changing the preference must
+not automatically re-extract the library or incur unexpected cost. It should
+only make lower-preference authoritative runs discoverable as upgrade
+candidates. Bulk-upgrade UI and automated library-wide reprocessing are outside
+the MVP.
+
+### 1.22 Deliberate re-extraction replaces source-owned output
+
+The unchanged-source incremental shortcut must remain the normal default, but
+it cannot block an explicit request to re-extract one selected source. The user
+may deliberately bypass the source-hash skip to use another model or a newer
+extractor/prompt/profile version. Exact command names should follow the existing
+CLI rather than being fixed in this plan.
+
+Example:
+
+```text
+Book A / Chapter 3 -> Flash -> A B C D
+same source        -> Pro   -> A B C E F
+```
+
+If Pro is preferred and the replacement succeeds, the live source-derived
+knowledge becomes:
+
+```text
+A B C E F
+```
+
+It must not remain `A B C D E F` merely to preserve model history. Git history,
+extraction-run provenance, and source history where applicable provide review
+and rollback. Conflicting outputs from multiple extraction models for the same
+source are not simultaneously live knowledge.
+
+Replacement is source-aware reconciliation, not blind graph deletion:
+
+- retain or reconcile A/B/C when they represent the same supported knowledge;
+- remove D only when it is no longer supported and owned only by this source;
+- add E/F;
+- update source-owned relationships and provenance;
+- preserve shared canonical entities still referenced by other sources.
+
+For example, if Book A and Book B both point to `AskFollowUpQuestion`, a new Book
+A extraction may remove Book A's claim or relation without deleting the shared
+canonical action while Book B still references it. Normal orphan and reference
+cleanup determines whether an unreferenced shared object can later be removed.
+
+### 1.23 Extraction authority must not erase genuine disagreement
+
+Authority decisions apply to competing extraction runs for the same
+source-derived knowledge. They do not rank authors or erase disagreement among
+independent sources.
+
+Required cases:
+
+#### Same source, better model
+
+If Flash is authoritative and the user explicitly reruns the same source with
+preferred Pro, Pro becomes authoritative after successful reconciliation. The
+Git diff shows removed, changed, and added source-owned knowledge.
+
+#### Same source, lower-preference model
+
+If Pro is already authoritative and the source is rerun with Flash, the safe
+default is no silent downgrade. Lower-preference output may remain staged as a
+non-authoritative candidate/debug result or the operation may require an
+explicit authority override, using existing candidate/review facilities where
+available. It must not silently replace the live Pro-derived knowledge.
+
+#### Same source, same model, newer extraction configuration
+
+Model name is not the only authority input. A deliberate rerun with the same
+model and a newer extractor, prompt, or profile may replace the older source
+extraction when the user requests it and the reconciliation succeeds.
+
+#### Different sources disagree
+
+If Book A extracted with Flash says X and Book B extracted with Pro says Y,
+both source-specific claims remain. Model preference does not resolve genuine
+disagreement between sources or authors. It only helps select the authoritative
+extraction of each individual source.
+
 ## 2. Users - Who is this for?
 
 Primary user:
@@ -605,8 +832,14 @@ The user should not have to:
 ### Shared foundation required by both social and later software graphs
 
 - Stable source identity and source hashing.
+- Canonical reusable Author, Work, and source metadata referenced by derived knowledge rather than copied as independently authoritative strings.
+- Detected-versus-confirmed metadata, review state, and a critical-identity gate before expensive semantic extraction.
 - Exact `SourceSpan` support with line and optional character bounds.
-- Extraction/prompt/profile version provenance.
+- Metadata-aware dependency invalidation that separates display/reference corrections from semantic-context changes.
+- Extraction-run provenance covering source version, generation provider/model, extractor, prompt, and profile/schema versions.
+- Configurable generation-model preference order without automatic library-wide reprocessing.
+- Explicit selected-source re-extraction that can bypass unchanged-source skipping.
+- Authoritative source-owned replacement that reconciles retained knowledge, removes unsupported source-only output, and preserves shared entities.
 - Git-trackable structured output.
 - Remote/local video source abstraction.
 - Generic command adapter for the user's existing video downloader.
@@ -667,6 +900,11 @@ Do not implement yet:
 - emotion detection presented as fact;
 - mobile/live conversation coaching;
 - new MCP/ChatGPT integration work.
+- bulk library model-upgrade UI;
+- automatic re-extraction of every lower-preference source;
+- permanent duplicate live graph outputs for competing models of the same source;
+- per-node numerical model-quality scores;
+- a model benchmarking framework.
 
 ## 4. Data - What are we storing?
 
@@ -677,15 +915,50 @@ Store:
 - source ID;
 - source type;
 - title;
-- author ID;
-- work ID;
+- canonical Author reference(s);
+- canonical Work reference;
 - chapter number/title where applicable;
 - local path or remote URL;
 - source hash;
 - ingestion metadata;
+- metadata resolution status;
+- detected metadata candidates and confidence where available;
+- canonical/accepted metadata references;
+- extraction-run ID;
+- generation provider;
+- generation model;
 - extractor version;
 - prompt version;
 - profile/schema version.
+
+Canonical entities and references are authoritative. A derived claim normally
+points to its Source or Chapter, the Chapter points to its Work, and the Work
+points to its Author or Authors. Derived nodes may contain denormalized display
+text only as a non-authoritative cache that can be regenerated. They must not
+contain independently editable author/work identity strings.
+
+Metadata resolution must distinguish detected values from accepted references.
+At minimum, the state can express equivalents of:
+
+- `needs_metadata` or `needs_review` for unresolved critical identity;
+- `confirmed` for accepted canonical metadata.
+
+Detected candidates may carry a value and confidence. Confirmed metadata stores
+canonical IDs such as `workId: the-game` and `authors: [neil-strauss]`. Follow
+existing llmwiki file and entity conventions rather than introducing a second
+metadata catalog.
+
+Each semantic extraction run records the source ID/hash plus provider, model,
+extractor, prompt, and profile/schema versions. It also records enough
+source-to-run ownership to identify the source-owned knowledge and relations
+produced by that run and the currently authoritative run for that source.
+Authority state may use repository-native candidate/review terminology. The
+live graph references only the accepted authoritative result for a source, not
+all conflicting model outputs.
+
+The model preference order lives in configuration. Do not copy numeric model
+scores into knowledge nodes. Changing that order marks or reports upgrade
+candidates but does not itself schedule extraction.
 
 ### 4.2 Source spans
 
@@ -813,11 +1086,15 @@ Generate readable condition text deterministically.
 
 For each chapter:
 
-- work ID;
-- author ID;
+- canonical Work reference;
+- Author resolution through the canonical Work, or an explicit canonical Author reference only when source semantics require it;
 - chapter number;
 - chapter title;
 - source identity/hash.
+
+Detected chapter/work/author candidates remain separate from confirmed
+canonical references. Once Work or Author identity is confirmed, later chapters
+reuse it rather than creating new independent strings or repeated questions.
 
 A later chapter can add relations to earlier extracted entities without deleting them.
 
@@ -966,7 +1243,13 @@ Keep:
 
 Add isolated generic modules/interfaces for:
 
+- canonical source metadata resolution;
+- critical-metadata review state;
 - source span resolution;
+- extraction-run generation provenance;
+- model-preference policy;
+- selected-source re-extraction and authority decisions;
+- source-owned knowledge reconciliation;
 - video source resolution;
 - remote/local ownership;
 - downloader command adapter;
@@ -1071,17 +1354,80 @@ Track dependencies among:
 
 `VideoSource -> Transcript -> AnalysisRun -> KnowledgeItems -> MediaSegments -> PhysicalClips`
 
+Also track the generic text/source path:
+
+`CanonicalMetadata -> SourceVersion -> ExtractionRun -> SourceOwnedKnowledge`
+
 Distinguish invalidation causes:
 
+- canonical display metadata changed;
+- canonical identity/reference changed;
+- semantic context or source hierarchy changed;
 - video bytes/source changed;
 - transcript changed;
+- generation provider/model changed during an explicit rerun;
 - semantic extraction version changed;
 - segment boundary changed;
 - clip materialization changed.
 
 Avoid broad "everything stale" invalidation when a narrower dependency is known.
 
-### 5.9 Upstream sync strategy
+An author spelling, publication year, or other display-only correction should
+normally update references and rendered output without semantic extraction. A
+Work identity change, explicit social-context change, or hierarchy correction
+that affects interpretation should invalidate only the affected semantic path.
+
+### 5.9 Canonical metadata resolution
+
+Insert a generic metadata-resolution stage between source registration and
+expensive semantic extraction. It should:
+
+1. detect candidate source metadata through existing ingestion mechanisms;
+2. resolve high-confidence candidates to existing or new canonical entities;
+3. classify unresolved fields as identity-critical or non-critical;
+4. place the source in `NEEDS_METADATA` or `NEEDS_REVIEW` when critical identity remains ambiguous;
+5. defer expensive semantic extraction until the critical identity is accepted;
+6. persist the accepted canonical references for reuse by later chapters or related sources.
+
+Do not interrupt ingestion for harmless optional metadata. Reuse the existing
+entity, frontmatter, state, validation, and atomic-write mechanisms. Prefer an
+isolated resolver and small ingestion extension point over broad changes to the
+compiler core.
+
+### 5.10 Generation authority and source re-extraction
+
+Extend repository-native provenance so every semantic extraction run captures
+provider/model and source hash in addition to extractor/prompt/profile versions.
+Read generation-model preference from normal provider/config architecture as an
+ordered list. The list is policy, not a per-node score, and changing it must not
+start work automatically.
+
+Normal incremental compilation continues to skip an unchanged source. An
+explicit selected-source re-extraction path may bypass that skip for a chosen
+model or the current extractor/prompt/profile. The CLI spelling remains an
+implementation decision based on existing command conventions.
+
+Authority defaults:
+
+- a successful explicitly requested higher-preference run may replace the current authoritative run for the same source;
+- a lower-preference run must not silently downgrade a higher-preference authoritative run, and should remain non-authoritative/staged or require an explicit override;
+- a deliberate same-model run with newer extraction configuration may replace the older run after successful reconciliation;
+- model preference never compares or removes claims from different source identities.
+
+Use existing candidate/review staging when it can make replacement atomic.
+Reconciliation compares the old and new source-owned sets, retains or updates
+matching knowledge, adds newly supported knowledge, removes old knowledge or
+relations owned only by that source, and applies normal orphan/reference cleanup
+to shared canonical objects. It must not delete a shared object still referenced
+by another source.
+
+The resulting files must produce a comprehensible Git diff containing removed,
+changed, and added claims, relationship changes, and relevant provenance/model
+changes. The workflow never auto-commits. Historical review and rollback come
+from Git and extraction-run provenance, not duplicate conflicting live graph
+entities.
+
+### 5.11 Upstream sync strategy
 
 Use Git remotes:
 
@@ -1094,7 +1440,7 @@ Keep custom commits small and focused.
 
 Avoid editing upstream files when a profile/new module/adapter can solve the requirement.
 
-### 5.10 Coding standards after AI Blueprint adoption
+### 5.12 Coding standards after AI Blueprint adoption
 
 The Blueprint `AGENTS.md` remains the workflow entry point.
 
@@ -1162,7 +1508,49 @@ Preferred workflow:
 
 Do not auto-commit.
 
-### 7.3 Recommendation display
+### 7.3 Source metadata review and correction
+
+High-confidence source identity may proceed automatically. If a critical Work,
+Author, or chapter association is ambiguous, register the source and surface a
+clear `NEEDS_METADATA` or `NEEDS_REVIEW` state before semantic extraction spends
+provider tokens. Ask only for the identity needed to continue. Do not block on
+publication year or other optional display fields.
+
+The review should show detected candidates, confidence where available, and the
+canonical entity that will be referenced. After the user confirms or corrects
+it, store the answer once and reuse it for later chapters from the same Work.
+
+Correcting an Author name or canonical reference should be a one-location edit.
+Dependent recommendations and pages update through their Source, Chapter, and
+Work references. The status output should explain whether the correction is
+metadata-only or whether it invalidates semantic extraction because Work
+identity, explicit context, or meaningful hierarchy changed.
+
+### 7.4 Source re-extraction and model authority
+
+The user can deliberately select one source for re-extraction with a chosen
+model or the current extraction configuration, even when the source hash is
+unchanged. Exact command names should follow existing CLI conventions.
+
+The workflow should show:
+
+- the source and unchanged/current source hash;
+- current authoritative provider/model and extraction versions;
+- requested provider/model and extraction versions;
+- whether preference policy treats the request as an upgrade, equivalent rerun, or downgrade;
+- which source-owned knowledge is removed, changed, retained, or added after reconciliation.
+
+An attempted lower-preference rerun must warn and refuse to silently replace a
+higher-preference authoritative extraction. It may produce non-authoritative
+candidate/debug output through existing staging or require an explicit override.
+
+For an accepted replacement, apply the reconciled source-owned result atomically
+where repository facilities permit, then leave a structured Git diff for review.
+The diff should make claim removals, claim changes, additions, relationship
+changes, and provenance/model changes clear. The system does not auto-commit,
+and it does not preserve conflicting old model output as live graph knowledge.
+
+### 7.5 Recommendation display
 
 A recommendation should display locally:
 
@@ -1182,7 +1570,7 @@ A recommendation should display locally:
 
 The user should not have to navigate backward through many graph nodes to reconstruct applicability.
 
-### 7.4 Video ingest UX
+### 7.6 Video ingest UX
 
 Target end-state command conceptually:
 
@@ -1213,7 +1601,7 @@ local file
 
 Exact CLI names should follow existing project conventions.
 
-### 7.5 LosslessCut review UX
+### 7.7 LosslessCut review UX
 
 Target command conceptually:
 
@@ -1234,7 +1622,7 @@ The system should:
    - usage cleanup;
 9. leave structured changes visible in Git.
 
-### 7.6 Review states
+### 7.8 Review states
 
 Media segment lifecycle:
 
@@ -1244,7 +1632,7 @@ Media segment lifecycle:
 
 Do not permanently materialize every proposed clip before review.
 
-### 7.7 Selective rerun UX
+### 7.9 Selective rerun UX
 
 Support targeted commands/workflows conceptually equivalent to:
 
@@ -1257,7 +1645,7 @@ Support targeted commands/workflows conceptually equivalent to:
 
 The user should not have to know the full dependency graph manually.
 
-### 7.8 Garbage collection UX
+### 7.10 Garbage collection UX
 
 Dry-run first:
 
@@ -1273,7 +1661,7 @@ Display:
 
 Then actual delete only when explicitly requested.
 
-### 7.9 Failure behavior
+### 7.11 Failure behavior
 
 If remote download fails:
 - preserve manifests/source registration where useful;
@@ -1292,6 +1680,21 @@ If LosslessCut review import cannot map a segment:
 
 If exact source span fails validation:
 - reject the "verbatim" claim rather than storing potentially incorrect exact wording.
+
+If critical source identity is unresolved:
+- preserve source registration and detected metadata;
+- mark it for metadata review;
+- do not run expensive semantic extraction yet.
+
+If authoritative source re-extraction or reconciliation fails:
+- preserve the previous authoritative live knowledge;
+- retain enough non-authoritative run provenance to diagnose or retry;
+- do not leave a partially replaced source-owned graph.
+
+If a lower-preference extraction is requested for a source with a
+higher-preference authoritative run:
+- do not silently downgrade;
+- explain the current authority and require the configured candidate/override path.
 
 ## 8. Deployment - Where and how will this ship?
 
@@ -1314,8 +1717,10 @@ Inside Git repository:
 
 - project plans/profile;
 - structured knowledge;
-- source metadata;
+- canonical Author/Work/source metadata and detected metadata review state;
 - source spans;
+- extraction-run provider/model/version provenance and authoritative-run references;
+- source-owned knowledge/reconciliation metadata;
 - media manifests;
 - segment metadata;
 - dependency metadata;
@@ -1369,6 +1774,7 @@ Use a deliberately small but representative dataset.
 
 Several chapters from one social-interaction book:
 
+- at least one initially ambiguous Author or Work candidate that requires metadata review;
 - chapter 1 contains preview examples;
 - chapter 2 defines a high-level framework;
 - chapter 3 decomposes one stage;
@@ -1424,6 +1830,14 @@ The MVP is complete when the user can:
 23. dry-run GC and remove a truly unused clip;
 24. inspect all structured changes in `git diff`;
 25. rerun without unnecessarily processing unchanged sources.
+26. hold a source with unresolved critical Author identity in metadata review before expensive semantic extraction;
+27. correct accepted canonical Author metadata once and see dependent knowledge update without semantic re-extraction when meaning is unchanged;
+28. change the canonical Work identity and trigger the appropriate source reconciliation and affected semantic re-extraction;
+29. deliberately rerun a Flash-extracted source with Pro even though the source hash is unchanged;
+30. make the accepted Pro result authoritative and remove conflicting Flash-owned source claims from the live graph;
+31. preserve a shared canonical entity that remains referenced by the second source after the first source is re-extracted;
+32. inspect a clear Git diff showing removed, changed, retained, and added source-owned knowledge plus relevant provenance changes;
+33. rerun a Pro-authoritative source with lower-preference Flash without silently downgrading its live knowledge.
 
 ### 8.8 Post-MVP direction
 
